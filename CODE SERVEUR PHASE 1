@@ -1,0 +1,164 @@
+
+import socket
+import threading
+import sys
+from datetime import datetime
+class ChatServer:
+    def __init__(self, host='127.0.0.1', port=5555):
+        self.host = host
+        self.port = port
+        self.server_socket = None
+        self.clients = {}  # {socket: username}
+        self.clients_lock = threading.Lock()
+        self.running = False
+        
+    def start(self):
+        """Démarre le serveur de chat"""
+        try:
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(5)
+            self.running = True
+            
+            print(f"[SERVEUR] Démarré sur {self.host}:{self.port}")
+            print("[SERVEUR] En attente de connexions...")
+            
+            self.accept_connections()
+            
+        except Exception as e:
+            print(f"[ERREUR] Impossible de démarrer le serveur: {e}")
+            sys.exit(1)
+    
+    def accept_connections(self):
+        """Accepte les connexions entrantes des clients"""
+        while self.running:
+            try:
+                client_socket, client_address = self.server_socket.accept()
+                print(f"[CONNEXION] Nouvelle connexion depuis {client_address}")
+                
+                # Créer un thread pour gérer ce client
+                client_thread = threading.Thread(
+                    target=self.handle_client,
+                    args=(client_socket, client_address)
+                )
+                client_thread.daemon = True
+                client_thread.start()
+                
+            except Exception as e:
+                if self.running:
+                    print(f"[ERREUR] Erreur lors de l'acceptation: {e}")
+    
+    def handle_client(self, client_socket, client_address):
+        """Gère la communication avec un client spécifique"""
+        username = None
+        
+        try:
+            # Recevoir le nom d'utilisateur
+            client_socket.send("Entrez votre nom d'utilisateur: ".encode('utf-8'))
+            username = client_socket.recv(1024).decode('utf-8').strip()
+            
+            if not username:
+                client_socket.close()
+                return
+            
+            # Ajouter le client à la liste
+            with self.clients_lock:
+                self.clients[client_socket] = username
+            
+            # Notifier tous les clients
+            join_msg = f"[SYSTÈME] {username} a rejoint le chat!"
+            print(join_msg)
+            self.broadcast(join_msg, client_socket)
+            
+            # Envoyer un message de bienvenue
+            welcome_msg = f"[SYSTÈME] Bienvenue {username}! Il y a {len(self.clients)} utilisateur(s) connecté(s)."
+            client_socket.send(welcome_msg.encode('utf-8'))
+            
+            # Envoyer la liste des utilisateurs
+            users_list = self.get_users_list()
+            client_socket.send(f"[SYSTÈME] Utilisateurs connectés: {users_list}".encode('utf-8'))
+            
+            # Boucle de réception des messages
+            while self.running:
+                message = client_socket.recv(1024).decode('utf-8')
+                
+                if not message:
+                    break
+                
+                # Formater et diffuser le message
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                formatted_msg = f"[{timestamp}] {username}: {message}"
+                print(formatted_msg)
+                self.broadcast(formatted_msg, client_socket)
+        
+        except ConnectionResetError:
+            print(f"[DÉCONNEXION] {username or client_address} s'est déconnecté brutalement")
+        except Exception as e:
+            print(f"[ERREUR] Erreur avec le client {username or client_address}: {e}")
+        finally:
+            self.remove_client(client_socket, username)
+    
+    def broadcast(self, message, sender_socket=None):
+        """Diffuse un message à tous les clients sauf l'expéditeur"""
+        with self.clients_lock:
+            disconnected = []
+            
+            for client_socket in self.clients:
+                if client_socket != sender_socket:
+                    try:
+                        client_socket.send(message.encode('utf-8'))
+                    except:
+                        disconnected.append(client_socket)
+            
+            # Nettoyer les clients déconnectés
+            for client_socket in disconnected:
+                self.remove_client(client_socket, self.clients.get(client_socket))
+    
+    def remove_client(self, client_socket, username):
+        """Retire un client de la liste et notifie les autres"""
+        with self.clients_lock:
+            if client_socket in self.clients:
+                del self.clients[client_socket]
+        
+        try:
+            client_socket.close()
+        except:
+            pass
+        
+        if username:
+            leave_msg = f"[SYSTÈME] {username} a quitté le chat."
+            print(leave_msg)
+            self.broadcast(leave_msg)
+    
+    def get_users_list(self):
+        """Retourne la liste des utilisateurs connectés"""
+        with self.clients_lock:
+            return ", ".join(self.clients.values())
+    
+    def stop(self):
+        """Arrête le serveur proprement"""
+        print("\n[SERVEUR] Arrêt en cours...")
+        self.running = False
+        
+        # Fermer toutes les connexions clients
+        with self.clients_lock:
+            for client_socket in list(self.clients.keys()):
+                try:
+                    client_socket.close()
+                except:
+                    pass
+        
+        # Fermer le socket serveur
+        if self.server_socket:
+            self.server_socket.close()
+        
+        print("[SERVEUR] Arrêté.")
+
+if __name__ == "__main__":
+    server = ChatServer()
+    
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        server.stop()
