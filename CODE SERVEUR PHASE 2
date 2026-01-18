@@ -1,0 +1,394 @@
+FONCTIONNALITÉS AVANCÉES
+Serveur de Chat Multi-Clients Avancé - Phase 2
+Inclut: messagerie privée, channels, authentification
+
+import socket
+import threading
+import json
+import hashlib
+from datetime import datetime
+from collections import defaultdict
+
+class ChatServer:
+    def __init__(self, host='127.0.0.1', port=5555):
+        self.host = host
+        self.port = port
+        self.server_socket = None
+        self.clients = {}  # {socket: {'username': str, 'channels': set}}
+        self.channels = defaultdict(set)  # {channel_name: set of sockets}
+        self.clients_lock = threading.Lock()
+        self.running = False
+        
+        # Authentification simple (à améliorer en production)
+        self.users_db = {}  # {username: password_hash}
+        
+    def start(self):
+        """Démarre le serveur de chat"""
+        try:
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(10)
+            self.running = True
+            
+            print(f"[SERVEUR] Démarré sur {self.host}:{self.port}")
+            print("[SERVEUR] Fonctionnalités: messagerie privée, channels, authentification")
+            print("[SERVEUR] En attente de connexions...")
+            
+            self.accept_connections()
+            
+        except Exception as e:
+            print(f"[ERREUR] Impossible de démarrer le serveur: {e}")
+    
+    def accept_connections(self):
+        """Accepte les connexions entrantes"""
+        while self.running:
+            try:
+                client_socket, client_address = self.server_socket.accept()
+                print(f"[CONNEXION] Nouvelle connexion depuis {client_address}")
+                
+                client_thread = threading.Thread(
+                    target=self.handle_client,
+                    args=(client_socket, client_address)
+                )
+                client_thread.daemon = True
+                client_thread.start()
+                
+            except Exception as e:
+                if self.running:
+                    print(f"[ERREUR] Erreur lors de l'acceptation: {e}")
+    
+    def handle_client(self, client_socket, client_address):
+        """Gère la communication avec un client"""
+        username = None
+        
+        try:
+            # Authentification
+            username = self.authenticate_client(client_socket)
+            if not username:
+                return
+            
+            # Initialiser le client
+            with self.clients_lock:
+                self.clients[client_socket] = {
+                    'username': username,
+                    'channels': {'general'}
+                }
+                self.channels['general'].add(client_socket)
+            
+            # Messages de bienvenue
+            self.send_message(client_socket, {
+                'type': 'system',
+                'content': f'Bienvenue {username}! Utilisez /help pour voir les commandes.'
+            })
+            
+            self.broadcast_to_channel('general', {
+                'type': 'system',
+                'content': f'{username} a rejoint le chat!'
+            }, exclude=client_socket)
+            
+            self.send_users_list(client_socket)
+            
+            # Boucle de réception
+            while self.running:
+                data = client_socket.recv(4096).decode('utf-8')
+                if not data:
+                    break
+                
+                try:
+                    message = json.loads(data)
+                    self.process_message(client_socket, message)
+                except json.JSONDecodeError:
+                    # Compatibilité avec messages texte simples
+                    self.process_text_message(client_socket, username, data)
+        
+        except Exception as e:
+            print(f"[ERREUR] Erreur avec {username or client_address}: {e}")
+        finally:
+            self.remove_client(client_socket, username)
+    
+    def authenticate_client(self, client_socket):
+        """Gère l'authentification du client"""
+        try:
+            self.send_message(client_socket, {
+                'type': 'auth',
+                'content': 'LOGIN_OR_REGISTER'
+            })
+            
+            response = json.loads(client_socket.recv(1024).decode('utf-8'))
+            username = response.get('username', '').strip()
+            password = response.get('password', '').strip()
+            action = response.get('action', 'login')
+            
+            if not username or not password:
+                self.send_message(client_socket, {
+                    'type': 'auth',
+                    'content': 'INVALID_CREDENTIALS'
+                })
+                client_socket.close()
+                return None
+            
+            password_hash = hashlib.sha256(password.encode()).hexdigest()
+            
+            if action == 'register':
+                if username in self.users_db:
+                    self.send_message(client_socket, {
+                        'type': 'auth',
+                        'content': 'USER_EXISTS'
+                    })
+                    client_socket.close()
+                    return None
+                
+                self.users_db[username] = password_hash
+                print(f"[AUTH] Nouvel utilisateur enregistré: {username}")
+            
+            else:  # login
+                if username not in self.users_db or self.users_db[username] != password_hash:
+                    self.send_message(client_socket, {
+                        'type': 'auth',
+                        'content': 'INVALID_CREDENTIALS'
+                    })
+                    client_socket.close()
+                    return None
+            
+            self.send_message(client_socket, {
+                'type': 'auth',
+                'content': 'SUCCESS'
+            })
+            
+            return username
+            
+        except Exception as e:
+            print(f"[ERREUR] Erreur d'authentification: {e}")
+            return None
+    
+    def process_message(self, client_socket, message):
+        """Traite un message structuré JSON"""
+        msg_type = message.get('type', 'public')
+        content = message.get('content', '')
+        
+        username = self.clients[client_socket]['username']
+        
+        if msg_type == 'command':
+            self.process_command(client_socket, content)
+        
+        elif msg_type == 'private':
+            target = message.get('target')
+            self.send_private_message(client_socket, target, content)
+        
+        elif msg_type == 'channel':
+            channel = message.get('channel', 'general')
+            self.broadcast_to_channel(channel, {
+                'type': 'channel',
+                'channel': channel,
+                'username': username,
+                'content': content,
+                'timestamp': datetime.now().isoformat()
+            }, exclude=client_socket)
+        
+        else:  # public
+            self.broadcast_to_all({
+                'type': 'public',
+                'username': username,
+                'content': content,
+                'timestamp': datetime.now().isoformat()
+            }, exclude=client_socket)
+    
+    def process_text_message(self, client_socket, username, text):
+        """Traite un message texte brut (compatibilité)"""
+        text = text.strip()
+        
+        if text.startswith('/'):
+            self.process_command(client_socket, text)
+        else:
+            channels = self.clients[client_socket]['channels']
+            for channel in channels:
+                self.broadcast_to_channel(channel, {
+                    'type': 'channel',
+                    'channel': channel,
+                    'username': username,
+                    'content': text,
+                    'timestamp': datetime.now().isoformat()
+                }, exclude=client_socket)
+    
+    def process_command(self, client_socket, command):
+        """Traite les commandes du client"""
+        parts = command.split(maxsplit=2)
+        cmd = parts[0].lower()
+        username = self.clients[client_socket]['username']
+        
+        if cmd == '/help':
+            help_text = """
+Commandes disponibles:
+/mp <utilisateur> <message> - Envoyer un message privé
+/join <channel> - Rejoindre un channel
+/leave <channel> - Quitter un channel
+/channels - Lister les channels disponibles
+/users - Lister les utilisateurs connectés
+/quit - Se déconnecter
+            """
+            self.send_message(client_socket, {
+                'type': 'system',
+                'content': help_text
+            })
+        
+        elif cmd == '/mp' and len(parts) >= 3:
+            target_user = parts[1]
+            message = parts[2]
+            self.send_private_message(client_socket, target_user, message)
+        
+        elif cmd == '/join' and len(parts) >= 2:
+            channel = parts[1]
+            with self.clients_lock:
+                self.clients[client_socket]['channels'].add(channel)
+                self.channels[channel].add(client_socket)
+            
+            self.send_message(client_socket, {
+                'type': 'system',
+                'content': f'Vous avez rejoint #{channel}'
+            })
+            
+            self.broadcast_to_channel(channel, {
+                'type': 'system',
+                'content': f'{username} a rejoint #{channel}'
+            }, exclude=client_socket)
+        
+        elif cmd == '/leave' and len(parts) >= 2:
+            channel = parts[1]
+            with self.clients_lock:
+                if channel in self.clients[client_socket]['channels']:
+                    self.clients[client_socket]['channels'].discard(channel)
+                    self.channels[channel].discard(client_socket)
+            
+            self.send_message(client_socket, {
+                'type': 'system',
+                'content': f'Vous avez quitté #{channel}'
+            })
+        
+        elif cmd == '/channels':
+            channels_list = list(self.channels.keys())
+            self.send_message(client_socket, {
+                'type': 'system',
+                'content': f'Channels disponibles: {", ".join(channels_list)}'
+            })
+        
+        elif cmd == '/users':
+            self.send_users_list(client_socket)
+    
+    def send_private_message(self, sender_socket, target_username, content):
+        """Envoie un message privé"""
+        sender_username = self.clients[sender_socket]['username']
+        
+        target_socket = None
+        with self.clients_lock:
+            for sock, info in self.clients.items():
+                if info['username'] == target_username:
+                    target_socket = sock
+                    break
+        
+        if target_socket:
+            message = {
+                'type': 'private',
+                'from': sender_username,
+                'content': content,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.send_message(target_socket, message)
+            self.send_message(sender_socket, {
+                'type': 'private_sent',
+                'to': target_username,
+                'content': content,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+            print(f"[MP] {sender_username} -> {target_username}: {content}")
+        else:
+            self.send_message(sender_socket, {
+                'type': 'error',
+                'content': f'Utilisateur {target_username} introuvable'
+            })
+    
+    def broadcast_to_channel(self, channel, message, exclude=None):
+        """Diffuse un message dans un channel"""
+        with self.clients_lock:
+            for client_socket in self.channels[channel]:
+                if client_socket != exclude:
+                    try:
+                        self.send_message(client_socket, message)
+                    except:
+                        pass
+    
+    def broadcast_to_all(self, message, exclude=None):
+        """Diffuse un message à tous les clients"""
+        with self.clients_lock:
+            for client_socket in self.clients:
+                if client_socket != exclude:
+                    try:
+                        self.send_message(client_socket, message)
+                    except:
+                        pass
+    
+    def send_message(self, client_socket, message):
+        """Envoie un message JSON à un client"""
+        try:
+            data = json.dumps(message) + '\n'
+            client_socket.send(data.encode('utf-8'))
+        except Exception as e:
+            print(f"[ERREUR] Impossible d'envoyer le message: {e}")
+    
+    def send_users_list(self, client_socket):
+        """Envoie la liste des utilisateurs connectés"""
+        with self.clients_lock:
+            users = [info['username'] for info in self.clients.values()]
+        
+        self.send_message(client_socket, {
+            'type': 'users_list',
+            'users': users
+        })
+    
+    def remove_client(self, client_socket, username):
+        """Retire un client"""
+        with self.clients_lock:
+            if client_socket in self.clients:
+                channels = self.clients[client_socket]['channels']
+                for channel in channels:
+                    self.channels[channel].discard(client_socket)
+                del self.clients[client_socket]
+        
+        try:
+            client_socket.close()
+        except:
+            pass
+        
+        if username:
+            print(f"[DÉCONNEXION] {username}")
+            self.broadcast_to_all({
+                'type': 'system',
+                'content': f'{username} a quitté le chat'
+            })
+    
+    def stop(self):
+        """Arrête le serveur"""
+        print("\n[SERVEUR] Arrêt en cours...")
+        self.running = False
+        
+        with self.clients_lock:
+            for client_socket in list(self.clients.keys()):
+                try:
+                    client_socket.close()
+                except:
+                    pass
+        
+        if self.server_socket:
+            self.server_socket.close()
+        
+        print("[SERVEUR] Arrêté.")
+
+if __name__ == "__main__":
+    server = ChatServer()
+    
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        server.stop()
