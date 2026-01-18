@@ -1,0 +1,433 @@
+Code client phase 2
+Client de Chat avec Interface Graphique - Phase 2
+Utilise Tkinter pour l'interface utilisateur
+
+import socket
+import threading
+import json
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox
+from datetime import datetime
+import hashlib
+
+class ChatGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Chat Client")
+        self.root.geometry("900x600")
+        
+        self.client_socket = None
+        self.connected = False
+        self.username = None
+        self.current_channel = 'general'
+        self.channels = {'general'}
+        self.users_online = []
+        
+        self.setup_login_screen()
+    
+    def setup_login_screen(self):
+        """Écran de connexion/inscription"""
+        self.login_frame = ttk.Frame(self.root, padding="20")
+        self.login_frame.pack(expand=True)
+        
+        ttk.Label(self.login_frame, text="Bienvenue sur le Chat", 
+                  font=('Arial', 16, 'bold')).grid(row=0, column=0, columnspan=2, pady=20)
+        
+        ttk.Label(self.login_frame, text="Serveur:").grid(row=1, column=0, sticky='e', padx=5, pady=5)
+        self.server_entry = ttk.Entry(self.login_frame, width=30)
+        self.server_entry.insert(0, "127.0.0.1:5555")
+        self.server_entry.grid(row=1, column=1, padx=5, pady=5)
+        
+        ttk.Label(self.login_frame, text="Nom d'utilisateur:").grid(row=2, column=0, sticky='e', padx=5, pady=5)
+        self.username_entry = ttk.Entry(self.login_frame, width=30)
+        self.username_entry.grid(row=2, column=1, padx=5, pady=5)
+        
+        ttk.Label(self.login_frame, text="Mot de passe:").grid(row=3, column=0, sticky='e', padx=5, pady=5)
+        self.password_entry = ttk.Entry(self.login_frame, width=30, show='*')
+        self.password_entry.grid(row=3, column=1, padx=5, pady=5)
+        
+        button_frame = ttk.Frame(self.login_frame)
+        button_frame.grid(row=4, column=0, columnspan=2, pady=20)
+        
+        ttk.Button(button_frame, text="Connexion", 
+                   command=lambda: self.connect('login')).pack(side='left', padx=5)
+        ttk.Button(button_frame, text="Inscription", 
+                   command=lambda: self.connect('register')).pack(side='left', padx=5)
+        
+        self.status_label = ttk.Label(self.login_frame, text="", foreground='red')
+        self.status_label.grid(row=5, column=0, columnspan=2)
+    
+    def connect(self, action):
+        """Établit la connexion avec le serveur"""
+        server_info = self.server_entry.get().strip().split(':')
+        host = server_info[0]
+        port = int(server_info[1]) if len(server_info) > 1 else 5555
+        
+        username = self.username_entry.get().strip()
+        password = self.password_entry.get().strip()
+        
+        if not username or not password:
+            self.status_label.config(text="Veuillez remplir tous les champs")
+            return
+        
+        try:
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client_socket.connect((host, port))
+            
+            # Attendre la demande d'authentification
+            data = self.client_socket.recv(1024).decode('utf-8')
+            auth_request = json.loads(data)
+            
+            if auth_request.get('content') == 'LOGIN_OR_REGISTER':
+                # Envoyer les credentials
+                auth_data = {
+                    'action': action,
+                    'username': username,
+                    'password': password
+                }
+                self.client_socket.send(json.dumps(auth_data).encode('utf-8'))
+                
+                # Recevoir la réponse
+                response = json.loads(self.client_socket.recv(1024).decode('utf-8'))
+                
+                if response.get('content') == 'SUCCESS':
+                    self.username = username
+                    self.connected = True
+                    self.setup_chat_screen()
+                    
+                    # Démarrer le thread de réception
+                    receive_thread = threading.Thread(target=self.receive_messages)
+                    receive_thread.daemon = True
+                    receive_thread.start()
+                else:
+                    error_msg = response.get('content', 'Erreur de connexion')
+                    if error_msg == 'USER_EXISTS':
+                        self.status_label.config(text="Nom d'utilisateur déjà pris")
+                    elif error_msg == 'INVALID_CREDENTIALS':
+                        self.status_label.config(text="Identifiants invalides")
+                    else:
+                        self.status_label.config(text=error_msg)
+                    self.client_socket.close()
+        
+        except Exception as e:
+            self.status_label.config(text=f"Erreur: {e}")
+    
+    def setup_chat_screen(self):
+        """Configure l'interface de chat principale"""
+        self.login_frame.destroy()
+        
+        # Frame principal
+        main_frame = ttk.Frame(self.root)
+        main_frame.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        # Frame de gauche - Channels et Utilisateurs
+        left_frame = ttk.Frame(main_frame, width=200)
+        left_frame.pack(side='left', fill='both', padx=(0, 5))
+        
+        # Liste des channels
+        ttk.Label(left_frame, text="Channels", font=('Arial', 10, 'bold')).pack(pady=5)
+        
+        channels_frame = ttk.Frame(left_frame)
+        channels_frame.pack(fill='both', expand=True, pady=5)
+        
+        self.channels_listbox = tk.Listbox(channels_frame, height=8)
+        self.channels_listbox.pack(fill='both', expand=True)
+        self.channels_listbox.insert(0, "#general")
+        self.channels_listbox.selection_set(0)
+        self.channels_listbox.bind('<<ListboxSelect>>', self.on_channel_select)
+        
+        channel_buttons = ttk.Frame(left_frame)
+        channel_buttons.pack(fill='x', pady=5)
+        ttk.Button(channel_buttons, text="+", width=3, 
+                   command=self.join_channel).pack(side='left', padx=2)
+        ttk.Button(channel_buttons, text="-", width=3, 
+                   command=self.leave_channel).pack(side='left', padx=2)
+        
+        # Liste des utilisateurs
+        ttk.Separator(left_frame, orient='horizontal').pack(fill='x', pady=10)
+        ttk.Label(left_frame, text="Utilisateurs", font=('Arial', 10, 'bold')).pack(pady=5)
+        
+        self.users_listbox = tk.Listbox(left_frame, height=10)
+        self.users_listbox.pack(fill='both', expand=True)
+        self.users_listbox.bind('<Double-Button-1>', self.open_private_chat)
+        
+        # Frame de droite - Messages
+        right_frame = ttk.Frame(main_frame)
+        right_frame.pack(side='left', fill='both', expand=True)
+        
+        # En-tête
+        header_frame = ttk.Frame(right_frame)
+        header_frame.pack(fill='x', pady=(0, 5))
+        
+        self.channel_label = ttk.Label(header_frame, text=f"# {self.current_channel}", 
+                                        font=('Arial', 12, 'bold'))
+        self.channel_label.pack(side='left')
+        
+        ttk.Button(header_frame, text="Aide", command=self.show_help).pack(side='right')
+        
+        # Zone de messages
+        self.messages_area = scrolledtext.ScrolledText(
+            right_frame, 
+            wrap=tk.WORD, 
+            state='disabled',
+            font=('Arial', 10)
+        )
+        self.messages_area.pack(fill='both', expand=True, pady=5)
+        
+        # Configuration des tags pour la coloration
+        self.messages_area.tag_config('system', foreground='blue')
+        self.messages_area.tag_config('private', foreground='green', font=('Arial', 10, 'bold'))
+        self.messages_area.tag_config('error', foreground='red')
+        self.messages_area.tag_config('sent', foreground='purple')
+        self.messages_area.tag_config('timestamp', foreground='gray')
+        
+        # Zone de saisie
+        input_frame = ttk.Frame(right_frame)
+        input_frame.pack(fill='x')
+        
+        self.message_entry = ttk.Entry(input_frame, font=('Arial', 10))
+        self.message_entry.pack(side='left', fill='x', expand=True, padx=(0, 5))
+        self.message_entry.bind('<Return>', lambda e: self.send_message())
+        
+        ttk.Button(input_frame, text="Envoyer", command=self.send_message).pack(side='left')
+        
+        self.message_entry.focus()
+    
+    def receive_messages(self):
+        """Thread pour recevoir les messages"""
+        buffer = ""
+        
+        while self.connected:
+            try:
+                data = self.client_socket.recv(4096).decode('utf-8')
+                if not data:
+                    break
+                
+                buffer += data
+                
+                # Traiter tous les messages complets (séparés par \n)
+                while '\n' in buffer:
+                    line, buffer = buffer.split('\n', 1)
+                    if line:
+                        try:
+                            message = json.loads(line)
+                            self.display_message(message)
+                        except json.JSONDecodeError:
+                            pass
+            
+            except Exception as e:
+                if self.connected:
+                    self.root.after(0, lambda: messagebox.showerror(
+                        "Erreur", f"Connexion perdue: {e}"))
+                break
+        
+        self.connected = False
+    
+    def display_message(self, message):
+        """Affiche un message dans l'interface"""
+        msg_type = message.get('type', 'public')
+        content = message.get('content', '')
+        
+        self.messages_area.config(state='normal')
+        
+        if msg_type == 'system':
+            self.messages_area.insert('end', f"[SYSTÈME] {content}\n", 'system')
+        
+        elif msg_type == 'private':
+            sender = message.get('from', 'Unknown')
+            timestamp = message.get('timestamp', '')
+            time_str = self.format_timestamp(timestamp)
+            self.messages_area.insert('end', f"[{time_str}] ", 'timestamp')
+            self.messages_area.insert('end', f"[MP de {sender}] {content}\n", 'private')
+        
+        elif msg_type == 'private_sent':
+            target = message.get('to', 'Unknown')
+            timestamp = message.get('timestamp', '')
+            time_str = self.format_timestamp(timestamp)
+            self.messages_area.insert('end', f"[{time_str}] ", 'timestamp')
+            self.messages_area.insert('end', f"[MP à {target}] {content}\n", 'sent')
+        
+        elif msg_type == 'channel':
+            username = message.get('username', 'Unknown')
+            timestamp = message.get('timestamp', '')
+            time_str = self.format_timestamp(timestamp)
+            self.messages_area.insert('end', f"[{time_str}] {username}: {content}\n")
+        
+        elif msg_type == 'users_list':
+            self.users_online = message.get('users', [])
+            self.update_users_list()
+        
+        elif msg_type == 'error':
+            self.messages_area.insert('end', f"[ERREUR] {content}\n", 'error')
+        
+        self.messages_area.see('end')
+        self.messages_area.config(state='disabled')
+    
+    def send_message(self):
+        """Envoie un message"""
+        text = self.message_entry.get().strip()
+        if not text:
+            return
+        
+        try:
+            if text.startswith('/'):
+                # Commande
+                message = {
+                    'type': 'command',
+                    'content': text
+                }
+            else:
+                # Message normal dans le channel actuel
+                message = {
+                    'type': 'channel',
+                    'channel': self.current_channel,
+                    'content': text
+                }
+            
+            self.client_socket.send(json.dumps(message).encode('utf-8'))
+            self.message_entry.delete(0, 'end')
+            
+            # Afficher son propre message
+            if not text.startswith('/'):
+                self.display_message({
+                    'type': 'channel',
+                    'username': self.username,
+                    'content': text,
+                    'timestamp': datetime.now().isoformat()
+                })
+        
+        except Exception as e:
+            messagebox.showerror("Erreur", f"Impossible d'envoyer le message: {e}")
+    
+    def join_channel(self):
+        """Rejoint un nouveau channel"""
+        channel = tk.simpledialog.askstring("Rejoindre un channel", 
+                                            "Nom du channel:")
+        if channel:
+            try:
+                message = {
+                    'type': 'command',
+                    'content': f'/join {channel}'
+                }
+                self.client_socket.send(json.dumps(message).encode('utf-8'))
+                
+                if channel not in self.channels:
+                    self.channels.add(channel)
+                    self.channels_listbox.insert('end', f"#{channel}")
+            except Exception as e:
+                messagebox.showerror("Erreur", str(e))
+    
+    def leave_channel(self):
+        """Quitte un channel"""
+        selection = self.channels_listbox.curselection()
+        if not selection:
+            return
+        
+        channel_text = self.channels_listbox.get(selection[0])
+        channel = channel_text[1:]  # Enlever le #
+        
+        if channel == 'general':
+            messagebox.showwarning("Avertissement", "Impossible de quitter #general")
+            return
+        
+        try:
+            message = {
+                'type': 'command',
+                'content': f'/leave {channel}'
+            }
+            self.client_socket.send(json.dumps(message).encode('utf-8'))
+            
+            self.channels.discard(channel)
+            self.channels_listbox.delete(selection[0])
+        except Exception as e:
+            messagebox.showerror("Erreur", str(e))
+    
+    def on_channel_select(self, event):
+        """Change le channel actif"""
+        selection = self.channels_listbox.curselection()
+        if selection:
+            channel_text = self.channels_listbox.get(selection[0])
+            self.current_channel = channel_text[1:]  # Enlever le #
+            self.channel_label.config(text=f"# {self.current_channel}")
+    
+    def open_private_chat(self, event):
+        """Ouvre une conversation privée"""
+        selection = self.users_listbox.curselection()
+        if not selection:
+            return
+        
+        target_user = self.users_listbox.get(selection[0])
+        if target_user == self.username:
+            return
+        
+        message = tk.simpledialog.askstring("Message privé", 
+                                           f"Message à {target_user}:")
+        if message:
+            try:
+                msg = {
+                    'type': 'private',
+                    'target': target_user,
+                    'content': message
+                }
+                self.client_socket.send(json.dumps(msg).encode('utf-8'))
+            except Exception as e:
+                messagebox.showerror("Erreur", str(e))
+    
+    def update_users_list(self):
+        """Met à jour la liste des utilisateurs"""
+        self.users_listbox.delete(0, 'end')
+        for user in sorted(self.users_online):
+            self.users_listbox.insert('end', user)
+    
+    def show_help(self):
+        """Affiche l'aide"""
+        help_text = """
+Commandes disponibles:
+
+/mp <utilisateur> <message> - Message privé
+/join <channel> - Rejoindre un channel
+/leave <channel> - Quitter un channel
+/channels - Lister les channels
+/users - Lister les utilisateurs
+/quit - Se déconnecter
+
+Double-cliquez sur un utilisateur pour lui envoyer un message privé.
+        """
+        messagebox.showinfo("Aide", help_text)
+    
+    def format_timestamp(self, timestamp):
+        """Formate un timestamp ISO"""
+        try:
+            dt = datetime.fromisoformat(timestamp)
+            return dt.strftime("%H:%M:%S")
+        except:
+            return datetime.now().strftime("%H:%M:%S")
+    
+    def on_closing(self):
+        """Gère la fermeture de l'application"""
+        if self.connected:
+            try:
+                message = {'type': 'command', 'content': '/quit'}
+                self.client_socket.send(json.dumps(message).encode('utf-8'))
+                self.client_socket.close()
+            except:
+                pass
+        
+        self.root.destroy()
+
+if __name__ == "__main__":
+    import tkinter.simpledialog
+    
+    root = tk.Tk()
+    app = ChatGUI(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()
+
+
+
+
+
+
+
+
+
