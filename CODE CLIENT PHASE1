@@ -1,0 +1,123 @@
+import socket
+import threading
+import sys
+
+class ChatClient:
+    def __init__(self, host='127.0.0.1', port=5555):
+        self.host = host
+        self.port = port
+        self.client_socket = None
+self.connected = False
+        self.username = None
+        
+    def connect(self):
+        """Établit la connexion avec le serveur"""
+        try:
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client_socket.connect((self.host, self.port))
+            self.connected = True
+            
+            print(f"[CLIENT] Connecté au serveur {self.host}:{self.port}")
+            
+            # Recevoir et afficher la demande de nom d'utilisateur
+            prompt = self.client_socket.recv(1024).decode('utf-8')
+            print(prompt, end='')
+            
+            # Envoyer le nom d'utilisateur
+            self.username = input().strip()
+            self.client_socket.send(self.username.encode('utf-8'))
+            
+            # Démarrer les threads d'écoute et d'envoi
+            receive_thread = threading.Thread(target=self.receive_messages)
+            receive_thread.daemon = True
+            receive_thread.start()
+            
+            self.send_messages()
+            
+        except ConnectionRefusedError:
+            print("[ERREUR] Impossible de se connecter au serveur. Assurez-vous qu'il est démarré.")
+            sys.exit(1)
+        except Exception as e:
+            print(f"[ERREUR] Erreur de connexion: {e}")
+            sys.exit(1)
+    
+    def receive_messages(self):
+        """Thread pour recevoir les messages du serveur"""
+        while self.connected:
+            try:
+                message = self.client_socket.recv(1024).decode('utf-8')
+                
+                if not message:
+                    print("\n[SYSTÈME] Déconnecté du serveur.")
+                    self.connected = False
+                    break
+                
+                # Afficher le message reçu
+                print(f"\n{message}")
+                print(f"{self.username}> ", end='', flush=True)
+                
+            except ConnectionResetError:
+                print("\n[SYSTÈME] Connexion perdue avec le serveur.")
+                self.connected = False
+                break
+            except Exception as e:
+                if self.connected:
+                    print(f"\n[ERREUR] Erreur de réception: {e}")
+                    self.connected = False
+                break
+    
+    def send_messages(self):
+        """Boucle principale pour envoyer des messages"""
+        print("\n=== Chat démarré ===")
+        print("Tapez vos messages et appuyez sur Entrée pour les envoyer.")
+        print("Tapez '/quit' pour quitter.\n")
+        
+        while self.connected:
+            try:
+                message = input(f"{self.username}> ")
+                
+                if not message:
+                    continue
+                
+                # Commande pour quitter
+                if message.lower() == '/quit':
+                    print("[CLIENT] Déconnexion...")
+                    self.disconnect()
+                    break
+                
+                # Envoyer le message au serveur
+                self.client_socket.send(message.encode('utf-8'))
+                
+            except KeyboardInterrupt:
+                print("\n[CLIENT] Interruption détectée.")
+                self.disconnect()
+                break
+            except Exception as e:
+                print(f"[ERREUR] Erreur d'envoi: {e}")
+                self.disconnect()
+                break
+    
+    def disconnect(self):
+        """Ferme la connexion proprement"""
+        self.connected = False
+        
+        if self.client_socket:
+            try:
+                self.client_socket.close()
+            except:
+                pass
+        
+        print("[CLIENT] Déconnecté.")
+        sys.exit(0)
+
+if __name__ == "__main__":
+    # Permettre de spécifier l'adresse et le port en arguments
+    host = sys.argv[1] if len(sys.argv) > 1 else '127.0.0.1'
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else 5555
+    
+    client = ChatClient(host, port)
+    
+    try:
+        client.connect()
+    except KeyboardInterrupt:
+        client.disconnect()
